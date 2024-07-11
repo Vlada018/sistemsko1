@@ -3,7 +3,6 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Net.Http;
 using System.Threading;
-using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
 
 namespace SysProg.Services
@@ -21,6 +20,7 @@ namespace SysProg.Services
             this.baseUrl = baseUrl;
             this.apiKey = apiKey;
             client = new HttpClient();
+            client.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
         }
 
         public List<JObject> FetchDataForQueries(List<string> queries, List<string> types)
@@ -33,25 +33,34 @@ namespace SysProg.Services
             }
 
             Console.WriteLine("Cache miss.");
-            var client = new HttpClient();
             var joinedTypes = string.Join(",", types);
-            client.DefaultRequestHeaders.Add("Authorization", $"Bearer {apiKey}");
 
-            var tasks = new List<Task<JObject>>();
+            var results = new List<JObject>();
+            var countDownEvent = new CountdownEvent(queries.Count);
+
             foreach (var query in queries)
             {
-                string url = $"{baseUrl}?q={Uri.EscapeDataString(query)}&type={joinedTypes}";
-                var task = client.GetAsync(url).ContinueWith(responseTask =>
+                ThreadPool.QueueUserWorkItem(_ =>
                 {
-                    var resBody = responseTask.Result.Content.ReadAsStringAsync().Result;
-                    return JObject.Parse(resBody);
+                    try
+                    {
+                        string url = $"{baseUrl}?q={Uri.EscapeDataString(query)}&type={joinedTypes}";
+                        var response = client.GetAsync(url).Result;
+                        var resBody = response.Content.ReadAsStringAsync().Result;
+                        var result = JObject.Parse(resBody);
+                        lock (results)
+                        {
+                            results.Add(result);
+                        }
+                    }
+                    finally
+                    {
+                        countDownEvent.Signal();
+                    }
                 });
-                tasks.Add(task);
             }
 
-            Task.WaitAll(tasks.ToArray());
-            var results = tasks.Select(t => t.Result).ToList();
-
+            countDownEvent.Wait();
             cache[cacheKey] = results;
             SetCacheExpiration(cacheKey);
 
